@@ -46,7 +46,9 @@ static uint8_t              s_seq = 0U;
 static uint32_t             s_last_tx_tick = 0U;
 static bool                 s_tx_pending = true;
 static uint32_t             s_last_status_tick = 0U;
-static uint32_t             s_last_issue_tick = 0U;
+static uint32_t             s_last_issue_tick = 0U;   /* son gonderim (tekrar dahil) */
+static uint32_t             s_first_issue_tick = 0U;  /* komutun ilk verildigi an     */
+static uint8_t              s_retry_count = 0U;
 static int8_t               s_op_applied = 0;
 static bool                 s_demo_active = false;
 
@@ -202,7 +204,25 @@ void GripperLink_Task(void)
     OperatorLogic(now);
   }
 
-  /* 4) Komut cercevesi: yeni komutta hemen, yoksa periyodik (canlilik) */
+  /* 4) Ack gelmediyse ayni komutu yeni seq ile tekrar gonder */
+  if (s_stat.online && (s_stat.ack_seq != s_seq) &&
+      (s_retry_count < GLINK_CMD_MAX_RETRY) &&
+      ((now - s_last_issue_tick) >= GLINK_CMD_ACK_TIMEOUT_MS) &&
+      ((now - s_first_issue_tick) <= GLINK_CMD_RETRY_WINDOW_MS))
+  {
+    s_seq++;
+    s_retry_count++;
+    s_tx_pending      = true;
+    s_last_issue_tick = now;
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    s_stat.last_seq = s_seq;
+    s_stat.retries++;
+    __set_PRIMASK(primask);
+  }
+
+  /* 5) Komut cercevesi: yeni komutta hemen, yoksa periyodik (canlilik) */
   if (s_tx_pending || ((now - s_last_tx_tick) >= GLINK_CMD_PERIOD_MS))
   {
     SendCommandFrame();
@@ -215,7 +235,9 @@ static void Issue(uint8_t cmd)
   s_cur_cmd = cmd;
   s_seq++;
   s_tx_pending = true;
-  s_last_issue_tick = HAL_GetTick();
+  s_last_issue_tick  = HAL_GetTick();
+  s_first_issue_tick = s_last_issue_tick;
+  s_retry_count      = 0U;
 
   uint32_t primask = __get_PRIMASK();
   __disable_irq();

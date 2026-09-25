@@ -27,6 +27,13 @@
 #define GLINK_OPERATOR_TIMEOUT_MS  500U   /* operator paketi kesilirse kiskaci durdur */
 #define GLINK_FILTER_BANK          11U    /* motor filtresi bank 10'da */
 
+/* Kiskac komutu onaylamazsa (ack_seq != seq) tekrar gonder.
+ * Ornek: master breakpoint'te durdu -> kiskac iletisim koptu sayip yeniden
+ * senkronize oldu -> ilk komut bilerek calistirilmadi. */
+#define GLINK_CMD_ACK_TIMEOUT_MS   150U
+#define GLINK_CMD_MAX_RETRY        3U
+#define GLINK_CMD_RETRY_WINDOW_MS  1000U  /* bundan eski komut tekrarlanmaz */
+
 /* Operator kiskac baytinin yonu: +1 (UART'ta 1) kapatir mi? Ters ise 0 yap */
 #define GLINK_OPERATOR_POSITIVE_IS_CLOSE  1
 /* 1: operator tusu birakinca kiskac durur (eski servo davranisi gibi)
@@ -53,6 +60,7 @@ typedef struct
   /* master tarafi */
   uint8_t  last_cmd;          /* son gonderilen komut */
   uint8_t  last_seq;
+  uint32_t retries;           /* ack gelmedigi icin tekrar gonderilen komut */
   uint32_t status_count;
   uint32_t rx_dropped;
 } GripperLinkStatus_t;
