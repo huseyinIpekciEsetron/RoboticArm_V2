@@ -16,7 +16,7 @@
 #include "arm_configuration.h"
 #include "motor_configuration.h"
 #include "arm_state_manager.h"
-#include "gripper_controller.h"
+#include "gripper_link.h"
 #include "homing.h"
 
 #define RX_MESSAGE_LENGTH 	255
@@ -26,6 +26,12 @@
 #define FOOTER1 			0xCC
 #define FOOTER2 			0xDD
 #define PACKET_ID			202
+
+/* Kiskac + mesafe sensoru paketi (operator tarafina, 202'ye ek) */
+#define GRIPPER_PACKET_ID		203
+#define GRIPPER_PACKET_EVERY_N	5U      /* TIM4 50 Hz -> her 5. gonderimde = 10 Hz */
+#define GRIPPER_PACKET_HDR_LEN	19U     /* ToF mesafelerinden onceki byte sayisi */
+#define GRIPPER_PACKET_MAX_LEN	(GRIPPER_PACKET_HDR_LEN + 2U * GCAN_TOF_MAX_ZONES + 3U)
 
 #define MAP_JOYSTICK_TO_VELOCITY(raw, multiplier)  ((int32_t)(((float)((int8_t)(raw)) / 127.0f) * ((float)((multiplier) * MOTOR_MAX_SPEED))))
 #define MAP_MOTOR_VELOCITY_TO_CARTESIAN_VELOCITY(raw, multiplier)  ((float)(((float)((int8_t)(raw)) / 127.0f) * ((float)((multiplier) * MAX_CARTESIAN_VELOCITY))))
@@ -85,8 +91,8 @@ typedef struct {
 	uint8_t packet_id;
 	ArmMotorMessage armMotorMsg[4];
 	uint8_t statusWord;
-	uint8_t gripperPosition;
-    uint8_t reserved[1];
+	uint8_t gripperFlags;     /* byte 52: GCAN_FLAG_* (kiskac bayraklari)            */
+	uint8_t gripperState;     /* byte 53: bit0-2 state, bit3 online, bit4-6 stop_reason */
 
 } RoboticArmMessage;
 

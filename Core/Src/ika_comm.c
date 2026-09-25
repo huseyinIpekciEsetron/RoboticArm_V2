@@ -24,7 +24,12 @@ static UART_HandleTypeDef *IkaCommUart;
 static ArmOperationMode currentArmOperationMode = ARM_MODE_IDLE;
 
 static uint8_t demo_index = 0;
-static int8_t demo_gripper = 1;
+
+/* Gonderim tamponu: 202 paketi + (her N'de bir) 203 kiskac paketi.
+ * HAL_UART_Transmit_IT ile gonderilir, bitene kadar dokunulmaz. */
+static uint8_t  ika_tx_buffer[TX_MESSAGE_LENGTH + GRIPPER_PACKET_MAX_LEN];
+static uint8_t  gripper_packet_counter = 0;
+uint32_t        IkaComm_TxSkipped = 0;   /* UART hala mesgulken atlanan gonderimler */
 
 static uint8_t calculate_crc(uint8_t* data)
 {
@@ -80,7 +85,7 @@ void IkaComm_Parse(UART_HandleTypeDef *huart)
 					motor_speeds[3] = IKARecMsg.motor_4;
 					for (uint8_t i = 0; i < NUMBER_OF_MOTORS; i++)
 						ArmController_ApplyJointVelocity(i, motor_speeds[i]);
-					GripperController_Move((float)(IKARecMsg.gripper));
+					GripperLink_OperatorInput(IKARecMsg.gripper);
 				}
 				break;
 			case GO_HOME:
@@ -105,11 +110,12 @@ void IkaComm_Parse(UART_HandleTypeDef *huart)
 					//ArmController_ApplyIKVelocity(tip_velocity);
 					ArmController_DriveCartesianClosedLoop(tip_velocity, 0.031f);
 					ArmController_ApplyJointVelocity(3, IKARecMsg.motor_4);
-					GripperController_Move((float)(IKARecMsg.gripper));
+					GripperLink_OperatorInput(IKARecMsg.gripper);
 				}
 				break;
 			case MOTOR_STOP_HOMING_CLEAR:
 				ArmController_StopAllJoints();
+				GripperLink_RequestCommand(GCAN_CMD_STOP);
 				ArmStateManager_SetCurrentState(ARMSTATE_IDLE);
 				ArmStateManager_ClearHomedMotorMask();
 				Homing_setHomingState(HOMING_IDLE);
@@ -132,11 +138,8 @@ void IkaComm_Parse(UART_HandleTypeDef *huart)
 					ArmController_ApplyJointVelocity(3, DEMO_SPEED * IKARecMsg.speed_multiplier * 5);
 					if (is_arrived)
 						demo_index = (demo_index + 1) % 3;
-					if(GripperLevel_GetSendGripperPosition() >= 42)
-						demo_gripper = -1;
-					else if(GripperLevel_GetSendGripperPosition() <= 26)
-						demo_gripper = 1;
-					GripperController_Move((float)(demo_gripper));
+					/* Kiskac uca dayandikca yon degistirir (gripper_link.c DemoLogic) */
+					GripperLink_DemoTick();
 				}
 				break;
 			case IDLE:
@@ -149,7 +152,6 @@ void IkaComm_Parse(UART_HandleTypeDef *huart)
 				break;
 		}
 
-		//GripperController_Move((float)(IKARecMsg.gripper)); // (-1) - 1
 	}
 	memset(IKA_receive_buffer, '\0', RX_MESSAGE_LENGTH);
 	HAL_UART_Receive_DMA(huart, IKA_receive_buffer, RX_MESSAGE_LENGTH);
@@ -183,8 +185,8 @@ MessageStatus IkaComm_encodeMessage(uint8_t* sendBuffer)
 	}
 	//roboticArmMsg.statusWord = (ArmStateManager_GetCurrentState() == ARMSTATE_READY)? 0x01U:0x00U;
 	sendBuffer[51] = roboticArmMsg.statusWord;
-	sendBuffer[52] = roboticArmMsg.gripperPosition;
-	sendBuffer[53] = roboticArmMsg.reserved[0];
+	sendBuffer[52] = roboticArmMsg.gripperFlags;
+	sendBuffer[53] = roboticArmMsg.gripperState;
 	sendBuffer[54] = calculate_crc(sendBuffer);
 	sendBuffer[55] = FOOTER1;
 	sendBuffer[56] = FOOTER2;
@@ -199,26 +201,91 @@ void IkaComm_buildMotorMessage(uint8_t motorStateIndex)
 	roboticArmMsg.armMotorMsg[motorStateIndex].board_temp = (int8_t)(MotorState_Get(motorStateIndex).pcb_temperature);
 	roboticArmMsg.armMotorMsg[motorStateIndex].coil_temp = (int8_t)(MotorState_Get(motorStateIndex).coil_temperature);
 	roboticArmMsg.armMotorMsg[motorStateIndex].error.whole = MotorState_Get(motorStateIndex).error_code.whole;
-	roboticArmMsg.reserved[0] = 0x00;
-	roboticArmMsg.reserved[1] = 0x00;
-	roboticArmMsg.reserved[2] = 0x00;
 	roboticArmMsg.armMotorMsg[motorStateIndex].speed = (int16_t)((MotorState_Get(motorStateIndex).velocity * 360) / (101*100));
 	roboticArmMsg.armMotorMsg[motorStateIndex].current = MotorState_Get(motorStateIndex).current;
 	roboticArmMsg.statusWord = (uint8_t)Homing_getHomingState();
-	roboticArmMsg.gripperPosition = GripperLevel_GetSendGripperPosition();
+
+	GripperLinkStatus_t gs;
+	GripperLink_GetStatus(&gs);
+	roboticArmMsg.gripperFlags = gs.online ? gs.flags : 0U;
+	roboticArmMsg.gripperState = (uint8_t)((gs.state & 0x07U) | (gs.online ? 0x08U : 0x00U) |
+	                                       ((gs.stop_reason & 0x07U) << 4));
 }
 
+/* 203 paketi: kiskac durumu + tum mesafe verisi. Donus: yazilan byte sayisi.
+ *  0-1 : 0xAA 0xBB            2 : 203
+ *  3   : bit0 kiskac online, bit1 mesafe verisi var
+ *  4   : state   5 : motion   6 : stop_reason   7 : flags (GCAN_FLAG_*)
+ *  8-9 : akim [mA]            10: duty [%]      11: ariza sayisi
+ *  12  : olcum sayaci         13: bolge sayisi (0/16/64)   14: gecerli bolge
+ *  15-16: en yakin mesafe [mm] 17: en yakin bolge   18: ToF durum
+ *  19.. : bolge sayisi x uint16 mesafe [mm] (0 = gecersiz), little-endian
+ *  son 3: CRC (byte 2'den CRC'ye kadar toplam % 256), 0xCC, 0xDD          */
+static uint16_t IkaComm_encodeGripperPacket(uint8_t *b)
+{
+	GripperLinkStatus_t gs;
+	GripperLinkToF_t    tof;
+	uint16_t n = 0;
+
+	GripperLink_GetStatus(&gs);
+	GripperLink_GetToF(&tof);
+
+	uint8_t zones = gs.online ? tof.zone_count : 0U;
+
+	b[n++] = HEADER1;
+	b[n++] = HEADER2;
+	b[n++] = GRIPPER_PACKET_ID;
+	b[n++] = (uint8_t)((gs.online ? 0x01U : 0x00U) | ((zones > 0U) ? 0x02U : 0x00U));
+	b[n++] = gs.state;
+	b[n++] = gs.motion;
+	b[n++] = gs.stop_reason;
+	b[n++] = gs.flags;
+	b[n++] = (uint8_t)(gs.current_mA & 0xFFU);
+	b[n++] = (uint8_t)(gs.current_mA >> 8);
+	b[n++] = gs.duty;
+	b[n++] = gs.fault_count;
+	b[n++] = tof.meas_counter;
+	b[n++] = zones;
+	b[n++] = tof.valid_count;
+	b[n++] = (uint8_t)(tof.min_distance_mm & 0xFFU);
+	b[n++] = (uint8_t)(tof.min_distance_mm >> 8);
+	b[n++] = tof.min_zone;
+	b[n++] = tof.tof_state;
+	for (uint8_t z = 0; z < zones; z++) {
+		b[n++] = (uint8_t)(tof.distance_mm[z] & 0xFFU);
+		b[n++] = (uint8_t)(tof.distance_mm[z] >> 8);
+	}
+	uint8_t crc = 0;
+	for (uint16_t i = 2; i < n; i++)
+		crc = (uint8_t)(crc + b[i]);
+	b[n++] = crc;
+	b[n++] = FOOTER1;
+	b[n++] = FOOTER2;
+	return n;
+}
+
+/* TIM4 kesmesinden (50 Hz) cagrilir. Eskiden HAL_UART_Transmit ile kesme
+ * icinde ~5 ms bloklaniyordu (CAN kesmeleri bekliyordu). Artik kesme ile
+ * gonderiliyor, fonksiyon hemen donuyor. */
 void IkaComm_SendMsg(UART_HandleTypeDef *HUART)
 {
-	//RoboticArmMessage roboticArmMsg;
-	uint8_t SendMsg[TX_MESSAGE_LENGTH];
+	if (HUART->gState != HAL_UART_STATE_READY) {
+		IkaComm_TxSkipped++;          /* onceki paket hala gidiyor: bu turu atla */
+		return;
+	}
 
 	for(uint8_t i=0; i<NUMBER_OF_MOTORS; i++)
 		IkaComm_buildMotorMessage(i);
 
-	IkaComm_encodeMessage(SendMsg);
-	HAL_UART_Transmit(HUART, SendMsg, TX_MESSAGE_LENGTH, HAL_MAX_DELAY);
+	IkaComm_encodeMessage(ika_tx_buffer);
+	uint16_t len = TX_MESSAGE_LENGTH;
 
+	if (++gripper_packet_counter >= GRIPPER_PACKET_EVERY_N) {
+		gripper_packet_counter = 0;
+		len += IkaComm_encodeGripperPacket(&ika_tx_buffer[TX_MESSAGE_LENGTH]);
+	}
+
+	(void)HAL_UART_Transmit_IT(HUART, ika_tx_buffer, len);
 }
 
 MessageStatus IkaComm_decodeMessage(uint8_t* receiveBuffer)

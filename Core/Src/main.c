@@ -27,7 +27,7 @@
 #include "arm_state_manager.h"
 #include "arm_controller.h"
 #include "ika_comm.h"
-#include "gripper_controller.h"
+#include "gripper_link.h"
 #include "homing.h"
 /* USER CODE END Includes */
 
@@ -60,7 +60,6 @@ DMA_HandleTypeDef hdma_usart2_rx;
 /* USER CODE BEGIN PV */
 uint32_t Testtime =0;
 uint32_t periodTime = 0;
-uint32_t ADC1_data[1] = {0};
 
 
 bool ledOnOff = 0;
@@ -83,6 +82,7 @@ static void MX_TIM4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* FIFO1: motor SDO cevaplari (0x580-0x5FF) */
 void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *_hcan)
 {
   if (_hcan == &hcan)
@@ -92,19 +92,21 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef *_hcan)
   else return;
 }
 
+/* FIFO0: kiskac karti mesajlari (0x681-0x693) */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *_hcan)
+{
+  if (_hcan == &hcan)
+  {
+    GripperLink_OnCanRx(_hcan);
+  }
+}
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	//if(GPIO_Pin == GPIO_PIN_12 || GPIO_Pin == GPIO_PIN_13 || GPIO_Pin == GPIO_PIN_4)
 	//	Homing_HallEffectDetecter(GPIO_Pin);
 
 }
-/*void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-	if(hadc == &hadc1)
-	{
-		GripperLevel_SetGripperPosition(ADC1_data);
-	}
-}*/
 /* USER CODE END 0 */
 
 /**
@@ -144,15 +146,10 @@ int main(void)
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
   HAL_Delay(3000);
-  MotorControl_InitalizeCanProtocol(&hcan);
+  MotorControl_InitalizeCanProtocol(&hcan);   /* CAN'i baslatir, motor filtresi bank 10 */
+  GripperLink_Init(&hcan);                    /* kiskac filtresi bank 11 -> FIFO0 */
   MotorControl_SetAllMotorsToSpeedMode();
   HAL_Delay(100);
- // HAL_ADC_Start_DMA(&hadc1, ADC1_data, 1);
-  HAL_Delay(1000);
-//  GripperController_Init(&htim3);
-  HAL_Delay(50);
- // GripperController_Init(&htim3);
-  HAL_Delay(50);
   SimulatorManager_InitializePortAndTimer(&huart2, &htim2);
   HAL_Delay(50);
   IkaComm_InitializePort(&huart1, &htim4);
@@ -191,6 +188,9 @@ int main(void)
 			}
 		}
 		ArmStateManager_Update();
+
+		/* Kiskac: gelen durum/ToF mesajlarini isle, komut + canlilik gonder */
+		GripperLink_Task();
 
 		/*if(!HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13))
 		{
@@ -270,7 +270,7 @@ static void MX_CAN_Init(void)
   hcan.Init.TimeTriggeredMode = DISABLE;
   hcan.Init.AutoBusOff = DISABLE;
   hcan.Init.AutoWakeUp = DISABLE;
-  hcan.Init.AutoRetransmission = DISABLE;
+  hcan.Init.AutoRetransmission = ENABLE;   /* DISABLE iken arbitrasyon kaybeden cerceve sessizce kayboluyordu */
   hcan.Init.ReceiveFifoLocked = DISABLE;
   hcan.Init.TransmitFifoPriority = DISABLE;
   if (HAL_CAN_Init(&hcan) != HAL_OK)

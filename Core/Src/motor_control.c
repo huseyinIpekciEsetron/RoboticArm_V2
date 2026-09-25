@@ -48,7 +48,8 @@ CAN_FilterTypeDef can_filter; //CAN Bus Filter
 
 
 static void MotorControl_PushToMessageBuffer(uint16_t id, uint8_t *data) {
-	uint16_t motor_index = MotorConfiguration_FindIndexOfMotor(id);
+	int motor_index = MotorConfiguration_FindIndexOfMotor(id);
+	if (motor_index < 0) return;
 	MotorMessageBuffer *buffer = &message_buffers[motor_index];
 	MotorMessage *message = &buffer->messages[buffer->tail];
   message->id = MOTOR_ID_TX_CONSTANT + id;
@@ -61,7 +62,7 @@ static void MotorControl_PushToMessageBuffer(uint16_t id, uint8_t *data) {
 }
 
 void MotorControl_ProcessMessageBuffer(uint8_t id) {
-	uint16_t motor_index = MotorConfiguration_FindIndexOfMotor(id);
+	int motor_index = MotorConfiguration_FindIndexOfMotor(id);
 	if (motor_index < 0) return;
 	MotorMessageBuffer *buffer = &message_buffers[motor_index];
 	if (buffer->head == buffer->tail) return; // nothing to send, check the next motor
@@ -112,10 +113,13 @@ void MotorControl_InitalizeCanProtocol(CAN_HandleTypeDef *hcan)
   can_filter.FilterActivation = CAN_FILTER_ENABLE;
   can_filter.FilterBank = 10;
   can_filter.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-  can_filter.FilterIdHigh = 0;
+  /* Sadece motor SDO cevaplari (0x580-0x5FF) FIFO1'e. Onceden maske 0 idi,
+   * hattaki HER mesaj (kiskac, motor EMCY/heartbeat) motor kodu tarafindan
+   * isleniyordu. Kiskac mesajlari gripper_link'in filtresiyle FIFO0'a gider. */
+  can_filter.FilterIdHigh = (MOTOR_ID_RX_CONSTANT << 5);
   can_filter.FilterIdLow = 0;
-  can_filter.FilterMaskIdHigh = 0x000<<5;
-  can_filter.FilterMaskIdLow = 0x0000;
+  can_filter.FilterMaskIdHigh = (0x780 << 5);
+  can_filter.FilterMaskIdLow = 0x0006;           // IDE=0, RTR=0
   can_filter.FilterMode = CAN_FILTERMODE_IDMASK;
   can_filter.FilterScale = CAN_FILTERSCALE_32BIT;
   can_filter.SlaveStartFilterBank = 0;	
@@ -127,8 +131,10 @@ void MotorControl_InitalizeCanProtocol(CAN_HandleTypeDef *hcan)
 
 void MotorControl_ProcessCanMessage(void) {
   if (HAL_CAN_GetRxMessage(motor_can_handle, CAN_RX_FIFO1, &receive_header, receive_buffer) == HAL_OK) {
+    if (receive_header.IDE != CAN_ID_STD || receive_header.StdId < MOTOR_ID_RX_CONSTANT) return;
     uint16_t motor_id = receive_header.StdId - MOTOR_ID_RX_CONSTANT;
-    size_t motor_index = MotorConfiguration_FindIndexOfMotor(motor_id);
+    /* size_t isaretsizdi: -1 hic yakalanmiyor, bilinmeyen ID dizinin disina yaziyordu */
+    int motor_index = MotorConfiguration_FindIndexOfMotor(motor_id);
     if (motor_index < 0) return; // Ignore messages with invalid IDs
 
     uint8_t number_of_data_bytes = 0;
@@ -409,7 +415,7 @@ void ConvertLittleEndianArrayToValue(const uint8_t* in_array, void* out_value, s
 */
 
 void MotorControl_StartOffsetUpdate(uint8_t id, OffsetUpdateCallback completed_callback) {
-	uint16_t motor_index = MotorConfiguration_FindIndexOfMotor(id);
+	int motor_index = MotorConfiguration_FindIndexOfMotor(id);
 	if (motor_index < 0 ) return;
 	offset_context[motor_index].state = OFFSET_WAITING_POSITION;
 	offset_context[motor_index].completed_callback = completed_callback;
