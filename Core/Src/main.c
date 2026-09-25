@@ -61,6 +61,9 @@ DMA_HandleTypeDef hdma_usart2_rx;
 uint32_t Testtime =0;
 uint32_t periodTime = 0;
 
+volatile uint8_t dbg_gripper_cmd = 0xFF;  /* 1 ac, 2 kapa, 3 dur, 4 ariza temizle, 5 ToF yeniden */
+volatile int8_t  dbg_gripper_jog = 0;     /* +1 / -1 = operator tusu basili, 0 = birak */
+volatile uint8_t dbg_can_tec, dbg_can_rec, dbg_can_lec;
 
 bool ledOnOff = 0;
 uint8_t test, test2, speedModeTest, VelTest = 0, testID=0, pin=0, pin1=0;
@@ -189,6 +192,11 @@ int main(void)
 		}
 		ArmStateManager_Update();
 
+		if (dbg_gripper_cmd != 0xFF) { GripperLink_RequestCommand(dbg_gripper_cmd); dbg_gripper_cmd = 0xFF; }
+		if (dbg_gripper_jog != 0)    { GripperLink_OperatorInput(dbg_gripper_jog); }
+		uint32_t esr = hcan.Instance->ESR;
+		dbg_can_tec = (esr >> 16) & 0xFF;  dbg_can_rec = (esr >> 24) & 0xFF;  dbg_can_lec = (esr >> 4) & 0x07;
+
 		/* Kiskac: gelen durum/ToF mesajlarini isle, komut + canlilik gonder */
 		GripperLink_Task();
 
@@ -264,13 +272,13 @@ static void MX_CAN_Init(void)
   hcan.Instance = CAN1;
   hcan.Init.Prescaler = 8;
   hcan.Init.Mode = CAN_MODE_NORMAL;
-  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.SyncJumpWidth = CAN_SJW_2TQ;
   hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
   hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
-  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoBusOff = ENABLE;
   hcan.Init.AutoWakeUp = DISABLE;
-  hcan.Init.AutoRetransmission = ENABLE;   /* DISABLE iken arbitrasyon kaybeden cerceve sessizce kayboluyordu */
+  hcan.Init.AutoRetransmission = ENABLE;
   hcan.Init.ReceiveFifoLocked = DISABLE;
   hcan.Init.TransmitFifoPriority = DISABLE;
   if (HAL_CAN_Init(&hcan) != HAL_OK)
