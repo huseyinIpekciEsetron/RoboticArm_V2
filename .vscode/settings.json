@@ -1,0 +1,21 @@
+{
+	"files.associations": {
+		"main.h": "c",
+		"stm32f1xx_hal.h": "c",
+		"stddef.h": "c",
+		"stdint.h": "c",
+		"compare": "cpp",
+		"motor_configuration.h": "c",
+		"motor_control.h": "c",
+		"motor_state.h": "c",
+		"simulator_manager.h": "c",
+		"string.h": "c",
+		"arm_state_manager.h": "c",
+		"linear_algebra.h": "c",
+		"cmath": "c",
+		"arm_configuration.h": "c",
+		"math.h": "c",
+		"inverse_kinematics.h": "c",
+		"arm_controller.h": "c"
+	}
+}
